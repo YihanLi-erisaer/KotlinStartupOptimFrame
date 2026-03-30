@@ -47,9 +47,9 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":startup-core"))
+    implementation(project(":core"))
     implementation(project(":runtime"))
-    implementation(project(":startup-sample"))
+    implementation(project(":sample"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

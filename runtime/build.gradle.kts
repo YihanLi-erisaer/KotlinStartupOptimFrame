@@ -23,6 +23,6 @@ kotlin {
 }
 
 dependencies {
-    api(project(":startup-core"))
+    api(project(":core"))
     implementation(libs.kotlinx.coroutines.android)
 }

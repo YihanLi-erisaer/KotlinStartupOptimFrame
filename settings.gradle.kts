@@ -30,7 +30,7 @@ dependencyResolutionManagement {
 
 include(
     ":app",
-    ":startup-core",
+    ":core",
     ":runtime",
-    ":startup-sample",
+    ":sample",
 )
