@@ -37,7 +37,8 @@ fun StartupDashboard(
                 style = MaterialTheme.typography.headlineSmall,
             )
         }
-        items(tasks, key = { it.id }) { task ->
+        // Keys must be unique across the whole LazyColumn (tasks and traces share the same ids).
+        items(tasks, key = { "dag-${it.id}" }) { task ->
             DagTaskCard(task)
         }
         item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
@@ -47,7 +48,7 @@ fun StartupDashboard(
                 style = MaterialTheme.typography.headlineSmall,
             )
         }
-        items(traces, key = { it.id }) { trace ->
+        items(traces, key = { "trace-${it.id}" }) { trace ->
             TraceRow(trace)
         }
     }
