@@ -55,7 +55,7 @@ fun StartupDashboard(
 }
 
 @Composable
-private fun DagTaskCard(task: StartupTask) {
+internal fun DagTaskCard(task: StartupTask) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
@@ -81,7 +81,7 @@ private fun DagTaskCard(task: StartupTask) {
 }
 
 @Composable
-private fun TraceRow(trace: TaskTrace) {
+internal fun TraceRow(trace: TaskTrace) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),

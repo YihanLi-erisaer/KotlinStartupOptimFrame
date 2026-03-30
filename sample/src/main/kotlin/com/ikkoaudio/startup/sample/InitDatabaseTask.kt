@@ -5,7 +5,7 @@ import kotlinx.coroutines.delay
 
 class InitDatabaseTask : StartupTask {
     override val id: String = "database"
-    override val dependencies: List<String> = listOf("network")
+    override val dependencies: List<String> = listOf("network", "cache")
     override val runOnMainThread: Boolean = false
     override val needWait: Boolean = true
 

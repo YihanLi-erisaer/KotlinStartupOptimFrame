@@ -15,12 +15,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupDashboard
+import com.ikkoaudio.androidstartupoptimizationframework.benchmark.runNaiveJetpackStyleStartup
+import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonResult
+import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonScreen
 import com.ikkoaudio.startup.core.StartupManager
-import com.ikkoaudio.startup.core.StartupTask
 import com.ikkoaudio.startup.core.TaskRegistry
 import com.ikkoaudio.startup.core.tracer.StartupTracer
-import com.ikkoaudio.startup.core.tracer.TaskTrace
+import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -31,21 +32,30 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                var tasks by remember { mutableStateOf<List<StartupTask>?>(null) }
-                var traces by remember { mutableStateOf<List<TaskTrace>?>(null) }
+                var comparison by remember { mutableStateOf<StartupComparisonResult?>(null) }
 
                 LaunchedEffect(Unit) {
-                    val collected = TaskRegistry.collectTasks()
-                    val manager = StartupManager(collected)
-                    withContext(Dispatchers.Default) {
-                        manager.start(printDag = false)
+                    val naiveMs = measureTimeMillis {
+                        runNaiveJetpackStyleStartup(TaskRegistry.collectTasks())
                     }
-                    tasks = collected
-                    traces = StartupTracer.snapshot()
+                    StartupTracer.clear()
+                    val frameworkMs = measureTimeMillis {
+                        withContext(Dispatchers.Default) {
+                            StartupManager(TaskRegistry.collectTasks()).start(printDag = false)
+                        }
+                    }
+                    val traces = StartupTracer.snapshot()
+                    val tasksForUi = TaskRegistry.collectTasks()
+                    comparison = StartupComparisonResult(
+                        naiveSequentialTotalMs = naiveMs,
+                        frameworkTotalMs = frameworkMs,
+                        tasks = tasksForUi,
+                        frameworkTraces = traces,
+                    )
                 }
 
-                when {
-                    tasks == null || traces == null -> {
+                when (val c = comparison) {
+                    null -> {
                         Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
@@ -53,12 +63,7 @@ class MainActivity : ComponentActivity() {
                             CircularProgressIndicator()
                         }
                     }
-                    else -> {
-                        StartupDashboard(
-                            tasks = tasks!!,
-                            traces = traces!!,
-                        )
-                    }
+                    else -> StartupComparisonScreen(result = c)
                 }
             }
         }
