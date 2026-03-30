@@ -28,4 +28,9 @@ dependencyResolutionManagement {
     }
 }
 
-include(":composeApp")
+include(
+    ":app",
+    ":startup-core",
+    ":runtime",
+    ":startup-sample",
+)
