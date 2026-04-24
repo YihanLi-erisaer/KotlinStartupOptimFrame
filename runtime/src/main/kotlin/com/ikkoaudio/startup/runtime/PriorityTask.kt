@@ -1,5 +1,6 @@
 package com.ikkoaudio.startup.runtime
 
+import com.ikkoaudio.startup.core.ExecutionPhase
 import com.ikkoaudio.startup.core.StartupTask
 
 /**
@@ -13,6 +14,7 @@ class PriorityTask(
     override val dependencies: List<String> = delegate.dependencies
     override val runOnMainThread: Boolean = delegate.runOnMainThread
     override val needWait: Boolean = delegate.needWait
+    override val executionPhase: ExecutionPhase = delegate.executionPhase
 
     override suspend fun run() {
         delegate.run()

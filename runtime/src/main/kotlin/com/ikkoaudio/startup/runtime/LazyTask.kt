@@ -1,5 +1,6 @@
 package com.ikkoaudio.startup.runtime
 
+import com.ikkoaudio.startup.core.ExecutionPhase
 import com.ikkoaudio.startup.core.StartupTask
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -13,6 +14,7 @@ class LazyTask(private val delegate: StartupTask) : StartupTask {
     override val runOnMainThread: Boolean = delegate.runOnMainThread
     override val needWait: Boolean = delegate.needWait
     override val priority: Int = delegate.priority
+    override val executionPhase: ExecutionPhase = delegate.executionPhase
 
     private val mutex = Mutex()
     private var done: Boolean = false

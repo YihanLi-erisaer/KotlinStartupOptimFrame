@@ -1,5 +1,6 @@
 package com.ikkoaudio.startup.sample
 
+import com.ikkoaudio.startup.core.ExecutionPhase
 import com.ikkoaudio.startup.core.StartupTask
 import kotlinx.coroutines.delay
 
@@ -8,6 +9,7 @@ class InitNetworkTask : StartupTask {
     override val dependencies: List<String> = listOf("logger")
     override val runOnMainThread: Boolean = false
     override val needWait: Boolean = false
+    override val executionPhase: ExecutionPhase = ExecutionPhase.AfterFirstFrame
 
     override suspend fun run() {
         delay(200)

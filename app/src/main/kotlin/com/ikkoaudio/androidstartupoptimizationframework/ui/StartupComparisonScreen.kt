@@ -55,7 +55,7 @@ fun StartupComparisonScreen(
         }
         item {
             Text(
-                text = "任务图：logger →（network ∥ cache）→ database。顺序方式会让 network 与 cache 串行；框架在 logger 完成后并行执行二者。",
+                text = "任务图：logger →（network ∥ cache）→ database。顺序方式串行；框架侧：BeforeFirstFrame 仅 logger，AfterFirstFrame 并行 network/cache，Idle 上 database，并在阶段间等待帧与主线程 Idle。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -71,8 +71,8 @@ fun StartupComparisonScreen(
         }
         item {
             ComparisonMetricCard(
-                title = "启动优化框架（DAG + 并行调度）",
-                subtitle = "StartupManager：依赖就绪后并行分支",
+                title = "启动优化框架（分阶段 + DAG + 帧/Idle 间隙）",
+                subtitle = "runPhasedStartup：BeforeFirstFrame → 2×Choreographer 帧 → AfterFirstFrame → main Idle → Idle",
                 totalMs = result.frameworkTotalMs,
                 accent = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,

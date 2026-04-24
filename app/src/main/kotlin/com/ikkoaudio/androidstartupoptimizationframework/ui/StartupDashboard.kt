@@ -71,7 +71,7 @@ internal fun DagTaskCard(task: StartupTask) {
                 style = MaterialTheme.typography.bodySmall,
             )
             Text(
-                text = "main=${task.runOnMainThread}, needWait=${task.needWait}, priority=${task.priority}",
+                text = "phase=${task.executionPhase}, main=${task.runOnMainThread}, needWait=${task.needWait}, priority=${task.priority}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,

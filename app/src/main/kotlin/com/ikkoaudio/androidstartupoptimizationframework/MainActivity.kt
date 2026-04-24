@@ -18,12 +18,11 @@ import androidx.compose.ui.Modifier
 import com.ikkoaudio.androidstartupoptimizationframework.benchmark.runNaiveJetpackStyleStartup
 import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonResult
 import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonScreen
+import com.ikkoaudio.androidstartupoptimizationframework.startup.runPhasedStartup
 import com.ikkoaudio.startup.core.StartupManager
 import com.ikkoaudio.startup.core.TaskRegistry
 import com.ikkoaudio.startup.core.tracer.StartupTracer
 import kotlin.system.measureTimeMillis
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,9 +39,10 @@ class MainActivity : ComponentActivity() {
                     }
                     StartupTracer.clear()
                     val frameworkMs = measureTimeMillis {
-                        withContext(Dispatchers.Default) {
-                            StartupManager(TaskRegistry.collectTasks()).start(printDag = false)
-                        }
+                        runPhasedStartup(
+                            this@MainActivity,
+                            StartupManager(TaskRegistry.collectTasks()),
+                        )
                     }
                     val traces = StartupTracer.snapshot()
                     val tasksForUi = TaskRegistry.collectTasks()

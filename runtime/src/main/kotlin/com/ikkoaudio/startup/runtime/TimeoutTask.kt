@@ -1,5 +1,6 @@
 package com.ikkoaudio.startup.runtime
 
+import com.ikkoaudio.startup.core.ExecutionPhase
 import com.ikkoaudio.startup.core.StartupTask
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -16,6 +17,7 @@ class TimeoutTask(
     override val runOnMainThread: Boolean = delegate.runOnMainThread
     override val needWait: Boolean = delegate.needWait
     override val priority: Int = delegate.priority
+    override val executionPhase: ExecutionPhase = delegate.executionPhase
 
     override suspend fun run() {
         withTimeout(timeoutMs) {

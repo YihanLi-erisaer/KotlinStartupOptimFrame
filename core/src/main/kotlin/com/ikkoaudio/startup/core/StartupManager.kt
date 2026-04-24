@@ -10,25 +10,59 @@ class StartupManager(
     private val tasks: List<StartupTask>,
     private val dispatcher: StartupDispatcher = StartupDispatcher(),
 ) {
+    init {
+        val dup = tasks.groupBy { it.id }.filter { it.value.size > 1 }.keys
+        require(dup.isEmpty()) { "Duplicate startup task ids: ${dup.joinToString()}" }
+        validateDependencyPhases(tasks)
+    }
 
     /**
-     * Runs the task DAG: each task starts only after all [StartupTask.dependencies] have finished.
-     * Independent branches may run in parallel. [sorted] order is topological (with [StartupTask.priority] tie-break);
-     * jobs are launched in that order so dependency jobs always exist before dependents suspend on them.
+     * Runs [ExecutionPhase] slices one after another in a single [coroutineScope] (no real “first frame” / idle wait).
+     * Tracer is cleared once at the start; all phases are recorded; suitable for tests and for timing total work
+     * without app lifecycle hooks. For production decoupling, call [startPhase] from the UI thread / lifecycle
+     * with your own frame and idle gating.
      */
     suspend fun start(
         printDag: Boolean = true,
         sink: (String) -> Unit = { println(it) },
     ) = coroutineScope {
         StartupTracer.clear()
-        val sorted = sortTasks(tasks)
+        var completed: Set<String> = emptySet()
+        for (phase in ExecutionPhase.entries) {
+            if (tasks.none { it.executionPhase == phase }) continue
+            completed = startPhase(phase, completed, printDag = printDag, sink = sink, clearTracer = false)
+        }
+        StartupTracer.print(sink)
+    }
+
+    /**
+     * Runs all tasks in [phase] whose dependencies are either in [completedTaskIds] (earlier phases) or
+     * the same phase (DAG parallelism within the phase). Returns the union of [completedTaskIds] and ids
+     * completed in this call.
+     */
+    suspend fun startPhase(
+        phase: ExecutionPhase,
+        completedTaskIds: Set<String> = emptySet(),
+        printDag: Boolean = false,
+        sink: (String) -> Unit = { println(it) },
+        clearTracer: Boolean = false,
+    ): Set<String> = coroutineScope {
+        if (clearTracer) StartupTracer.clear()
+        val phaseTasks = tasks.filter { it.executionPhase == phase }
+        if (phaseTasks.isEmpty()) return@coroutineScope completedTaskIds
+
+        val sorted = sortTasksForPhase(phase, tasks, completedTaskIds)
         if (printDag) printDAG(sorted, sink)
 
         val jobById = LinkedHashMap<String, Job>()
         sorted.forEach { task ->
             val job = launch {
                 task.dependencies.forEach { depId ->
-                    jobById[depId]?.join()
+                    when {
+                        depId in completedTaskIds -> { /* already finished in a previous phase */ }
+                        else -> jobById[depId]?.join()
+                            ?: error("Internal: missing job for '$depId' while starting '${task.id}' in phase $phase")
+                    }
                 }
                 val startMs = System.currentTimeMillis()
                 val inner = dispatcher.dispatch(this@coroutineScope, task)
@@ -39,6 +73,6 @@ class StartupManager(
         }
 
         jobById.values.joinAll()
-        StartupTracer.print(sink)
+        completedTaskIds + phaseTasks.map { it.id }.toSet()
     }
 }
