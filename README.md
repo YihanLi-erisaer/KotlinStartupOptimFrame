@@ -283,12 +283,6 @@ The sample graph is **`logger → (network ∥ cache) → database`**, with simu
 
 ---
 
-## 10. License
-
-There is no root **`LICENSE`** file in this template repository. Add an explicit open-source or proprietary license before redistribution.
-
----
-
 ## Further reading
 
 - [App startup time](https://developer.android.com/topic/performance/vitals/launch-time) — Android Developers  
