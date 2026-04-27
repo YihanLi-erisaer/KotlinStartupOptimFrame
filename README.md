@@ -1,6 +1,6 @@
 # Android Startup Optimization Framework
 
-A Kotlin/Android library for **cold-start and pre–first-frame initialization**. It models startup work as a **directed acyclic graph (DAG)** of tasks, runs **independent branches in parallel** once their dependencies are satisfied (shortening wall-clock time toward the **critical path**), and provides registration, structured coroutine dispatch, **execution phases** (decouple from the first frame), **supervisor-style failure handling** (one task failure does not cancel siblings), **optional IO concurrency limits**, **injectable timing sinks** (`TaskTimingSink`) and **per-task run interceptors** (e.g. Android `Trace` / systrace), and runtime wrappers (lazy once, timeout, priority override).
+A Kotlin/Android library for **cold-start and pre–first-frame initialization**. It models startup work as a **directed acyclic graph (DAG)** of tasks, runs **independent branches in parallel** once their dependencies are satisfied (shortening wall-clock time toward the **critical path**), and provides registration, structured coroutine dispatch, **execution phases** (decouple from the first frame), an optional **BeforeFirstFrame “critical” subgraph** (via **`needWait`** and **`startBeforeFirstFrameUntilCritical`**), **supervisor-style failure handling** (one task failure does not cancel siblings), **optional IO concurrency limits**, a **dedicated or global task registry** for tests, **injectable timing sinks** (`TaskTimingSink`) and **per-task run interceptors** (e.g. Android `Trace` / systrace), and runtime wrappers (lazy once, timeout, priority override).
 
 **Demo app:** `:app` · **Modules:** `:core` (engine), `:runtime` (optional wrappers), `:sample` (example tasks).
 
@@ -62,7 +62,7 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 1. **Validation:** **Unique** task ids; every dependency id **exists**; `validateDependencyPhases`.
 2. **Graph:** edges, **in-degrees**, `PriorityQueue` for ready nodes ordered by **`priority`**, then **`id`**.
 
-**Per execution phase:** `planRunnableTasksInPhase` first **drops** tasks whose dependencies appear in a **failed** set (from prior phases or same-phase outcomes), records those as **skipped** in the plan, then runs **Kahn** on the remaining tasks in that phase. Same priority/tie-break rules apply within the phase.
+**Per execution phase:** `planRunnableTasksInPhase` can **restrict to a task-id subset** (`onlyInPhaseTaskIds`) and **skip ids already in `satisfiedFromEarlier`**—including from a **previous call** for the **same** phase (e.g. run **critical** BFF work first, then the rest of **BeforeFirstFrame**). It **drops** tasks whose dependencies are in a **failed** set, records **skipped** reasons, then runs **Kahn** on the remaining tasks. Same priority/tie-break rules apply within the phase.
 
 ### 2.3 Concurrency: `join` dependencies, then `execute` (avoids deadlock)
 
@@ -89,8 +89,9 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 | **`Idle`** | After the main **Looper** reports idle, for heavier deferred init. |
 
 - **`StartupManager.start()`** runs **all non-empty phases in order** in one **`suspend` coroutine** (no real “wait for frame” between phases—suitable for tests or total work measurement).
-- **`StartupManager.startPhase(phase, …)`** runs **one** phase; you call it from the app after **frames** or **idle** as needed.
-- The demo [`runPhasedStartup`](app/src/main/kotlin/com/ikkoaudio/androidstartupoptimizationframework/startup/PhasedStartup.kt) chains `startPhase(BeforeFirstFrame)` (on a worker dispatcher) → 2 **Choreographer** frame callbacks → `startPhase(AfterFirstFrame)` → main **idle** → `startPhase(Idle)`.
+- **`StartupManager.startPhase(phase, …)`** runs **one** phase (optionally **`onlyInPhaseTaskIds`** for a sub-DAG in that phase). You call it from the app after **frames** or **idle** as needed; pass **successful** ids in **`satisfiedFromEarlier`** for tasks already finished in a prior chunk (including another **BeforeFirstFrame** run).
+- **`StartupManager.startBeforeFirstFrameUntilCritical(isCritical = { it.needWait }, …)`** runs only the **transitive in-phase dependency closure** of tasks matching **`isCritical`** (default: **`needWait == true`**). Dismiss a splash or route when this **`PhaseResult`** returns; then call **`startPhase(BeforeFirstFrame, satisfiedFromEarlier = that.successTaskIds, …)`** for any **remaining** BFF tasks, or use the app’s **`BeforeFirstFrameMode.CriticalThenRemaining`** inside [`runPhasedStartup`](app/src/main/kotlin/com/ikkoaudio/androidstartupoptimizationframework/startup/PhasedStartup.kt) to do both steps automatically.
+- The demo **`runPhasedStartup`** (defaults: **`BeforeFirstFrameMode.Full`**, **`PhasedStartupRunPolicy.EveryTime`**) chains: BFF (see below) on a worker dispatcher → 2 **Choreographer** frames → optional **`onAfterVsync`** (default **`Activity.reportFullyDrawn()`** on API 19+) on the main thread → `startPhase(AfterFirstFrame)` → **main idle** (or **`idleHandlerTimeoutMs`**) → `startPhase(Idle)`.
 
 **Choreographer and the main `Looper`:** frame callbacks and `Looper.myQueue()` are tied to the **main** thread. The helpers that wait for frames or for **idle** use **`withContext(Dispatchers.Main.immediate)`** internally, so **`runPhasedStartup` is safe to call from any coroutine** (e.g. `Default`); you do not have to pre-switch to the main dispatcher.
 
@@ -132,7 +133,7 @@ This is **not** a full distributed trace; for production, combine **sampling** +
 
 | Module | Role |
 |--------|------|
-| **`core`** | `StartupTask`, `ExecutionPhase`, `StartupTaskProvider`, `TaskRegistry`, `Dag` (`sortTasks`, `planRunnableTasksInPhase`, …), `StartupDispatcher`, `StartupManager`, `StartupResult` (`PhaseResult`, `FullStartupResult`, …), `StartupTracer` / `InMemoryTaskTraceStore`, `TaskTimingSink` + `LogcatTaskTimingSink` / `CompositeTaskTimingSink` / `SampledTaskTimingSink`, `TaskRunInterceptor` + `AndroidTraceTaskRunInterceptor` |
+| **`core`** | `StartupTask`, `ExecutionPhase`, `StartupTaskProvider`, `StartupTaskRegistry` / `TaskRegistry`, `withTestRegistry`, `computeBeforeFirstFrameCriticalClosure`, `Dag` (`sortTasks`, `planRunnableTasksInPhase`, …), `StartupDispatcher`, `StartupManager` (`startBeforeFirstFrameUntilCritical`, …), `StartupResult` (`PhaseResult`, `FullStartupResult`, …), `StartupTracer` / `InMemoryTaskTraceStore`, `TaskTimingSink` + `LogcatTaskTimingSink` / `CompositeTaskTimingSink` / `SampledTaskTimingSink`, `TaskRunInterceptor` + `AndroidTraceTaskRunInterceptor` |
 | **`runtime`** | Optional wrappers: `LazyTask`, `TimeoutTask`, `PriorityTask` (delegate `executionPhase` too) |
 | **`sample`** | Example `Init*` tasks (mixed phases) and `CoreTaskProvider` |
 | **`app`** | `Application` registration, Compose UI, `runPhasedStartup`, benchmark |
@@ -150,21 +151,23 @@ This is **not** a full distributed trace; for production, combine **sampling** +
 | `id` | Unique string; referenced by other tasks’ `dependencies`. |
 | `dependencies` | All listed tasks must **succeed** before this task runs; otherwise this task may be **skipped** if a dependency failed. |
 | `runOnMainThread` | If `true`, `run()` on the main dispatcher; else on `Dispatchers.IO` (and subject to **IO** semaphore if configured). |
-| `needWait` | Semantic hint for your app (splash / routing). |
+| `needWait` | Drives the **BeforeFirstFrame critical closure** (with transitive BFF dependencies): use with **`startBeforeFirstFrameUntilCritical`**, or **`BeforeFirstFrameMode.CriticalThenRemaining`** in `runPhasedStartup`, so splash / routing can wait only for this subset; run the rest of BFF in a follow-up **`startPhase`**. |
 | `priority` | Default `0`. Higher = earlier among ready tasks in the same phase (topo tie-break). |
 | `executionPhase` | When the task is scheduled: `BeforeFirstFrame` (default), `AfterFirstFrame`, or `Idle`. |
 | `suspend fun run()` | Actual work; use **suspend** I/O; avoid blocking the main thread. |
 
-### 4.2 `StartupTaskProvider` and `TaskRegistry`
+### 4.2 `StartupTaskProvider`, `StartupTaskRegistry`, and `TaskRegistry`
 
 - Implement `StartupTaskProvider` with `fun provide(): List<StartupTask>`.
-- `TaskRegistry.register(…)` in `Application` or a single composition root; `collectTasks()` **flatMaps** providers; `clear()` for tests.
+- The **`StartupTaskRegistry`** class holds the same `register` / `clear` / `collectTasks()` API; **`object TaskRegistry : StartupTaskRegistry()`** is the process-wide default. Register in `Application` or a composition root.
+- For **tests**, prefer a local **`StartupTaskRegistry()`** and **`withTestRegistry { … }`** (see [§7.4](#74-testing)) so the global `TaskRegistry` is never touched; pass **`collectTasks()`** (or `StartupManager(registry, …)`) into **`StartupManager`**.
 
 ### 4.3 `StartupManager`
 
 ```kotlin
 val manager = StartupManager(
     tasks = TaskRegistry.collectTasks(),
+    // Or: StartupManager(StartupTaskRegistry().apply { register(MyProvider()) }, maxParallelIo = 4, …)
     maxParallelIo = 4, // optional cap for concurrent non–main tasks; omit or null = unlimited
     taskTiming = CompositeTaskTimingSink(
         listOf(
@@ -179,17 +182,27 @@ val manager = StartupManager(
 // Run all phases back-to-back in one coroutine (suspending); returns summary
 val result: FullStartupResult = manager.start(printDag = true) { line -> Log.d("Startup", line) }
 
-// Or run a single phase (e.g. after first frame), tracking successes and failures from earlier phases
+// Or run only the “critical” BFF closure (default predicate: needWait), then the rest in a second call:
+val critical: PhaseResult = manager.startBeforeFirstFrameUntilCritical() // { it.needWait } by default
+val rest: PhaseResult = manager.startPhase(
+    phase = ExecutionPhase.BeforeFirstFrame,
+    satisfiedFromEarlier = critical.successTaskIds,
+    failedFromEarlier = emptySet(), // or merge failures from your policy
+    printDag = false,
+)
+
+// Or run a single phase (e.g. after first frame)
 val phase: PhaseResult = manager.startPhase(
     phase = ExecutionPhase.AfterFirstFrame,
-    satisfiedFromEarlier = setOf("logger"),   // ids that succeeded in previous phases
-    failedFromEarlier = emptySet(),          // ids that failed; dependents are skipped
+    satisfiedFromEarlier = setOf("logger"),   // ids that succeeded in previous phases (or in an earlier BFF chunk)
+    failedFromEarlier = emptySet(),            // ids that failed; dependents are skipped
     printDag = false,
+    onlyInPhaseTaskIds = null,                 // optional subset of ids in this phase
 )
 ```
 
 - **`satisfiedFromEarlier`** should contain only **successful** task ids. **`failedFromEarlier`** should list **failed** ids so the planner can skip dependents.
-- **`start` is `suspend`** and uses `coroutineScope` across phases. **`startPhase` is `suspend`** and uses `supervisorScope` for that phase’s tasks.
+- **`start` is `suspend`** and uses `coroutineScope` across phases. **`startPhase` is `suspend`** and uses `supervisorScope` for that phase’s tasks. **`startBeforeFirstFrameUntilCritical` is `suspend`** and is **only** for **BeforeFirstFrame** + the computed closure.
 
 ### 4.4 `runtime` module (optional)
 
@@ -205,7 +218,9 @@ val phase: PhaseResult = manager.startPhase(
 
 ### 4.6 Phased startup helper (`app` sample)
 
-- **`runPhasedStartup(activity, manager)`** — runs the three **phases** with **two Choreographer frame callbacks** and a **main Looper** `IdleHandler` between phases, and uses **`ensureActive()`** between steps so a **cancelled** scope (e.g. when the `Activity` is destroyed) stops starting further phases. Frame/idle waiters run on **`Dispatchers.Main.immediate`** inside the helper (see [§2.4](#24-execution-phases)).
+- **`runPhasedStartup(activity, manager, …)`** — end-to-end: **BeforeFirstFrame** (mode **`Full`** vs **`CriticalThenRemaining`**), then **2× Choreographer** frames, then **`onAfterVsync`** (default **`reportFullyDrawn`**) on the main thread, **AfterFirstFrame**, then **main idle** (with optional **`idleHandlerTimeoutMs`**, because a busy main looper may never go idle), then **Idle**. Uses **`ensureActive()`** between steps. Optional **`onWindowReady(activity)`** at the start (main thread) to hook decor / `ViewTreeObserver` / alignment with your **first draw** definition.  
+- **`PhasedStartupRunPolicy`:** **`EveryTime`** (default, e.g. benchmarks), **`AtMostOncePerProcess`**, or **`AtMostOncePerActivity`** (decorView tag) to avoid duplicate phased runs.  
+- Frame/idle waiters use **`Dispatchers.Main.immediate`** (see [§2.4](#24-execution-phases)). You can combine with **`ProcessLifecycleOwner`** in the app to avoid double-starting from multiple entry points; policy + lifecycle are complementary.
 
 ---
 
@@ -247,6 +262,13 @@ suspend fun runAllPhasesInOneBlock() {
     val result = manager.start(printDag = BuildConfig.DEBUG)
     if (!result.isOverallSuccess) { /* log result.allFailures */ }
 }
+
+// Isolated test registry (no global TaskRegistry)
+fun exampleWithTestRegistry() = withTestRegistry(
+    { register(MyStartupProvider()) },
+) { r ->
+    StartupManager(r, maxParallelIo = 4)
+}
 ```
 
 ---
@@ -268,7 +290,7 @@ Run the **`app`** configuration in Android Studio.
 The **comparison screen** measures:
 
 1. **Naive sequential total** — `measureTimeMillis { runNaiveJetpackStyleStartup(...) }`
-2. **Framework total** — `measureTimeMillis { runPhasedStartup(MainActivity, StartupManager(..., maxParallelIo = 4, taskTiming = …, runInterceptor = …)) }` (real first-frame / idle gating, IO cap **4**; **`:app` wires** `CompositeTaskTimingSink` + `defaultInterceptor` as in [§4.3](#43-startupmanager))
+2. **Framework total** — `measureTimeMillis { runPhasedStartup(MainActivity, StartupManager(...)) }` (defaults: **`PhasedStartupRunPolicy.EveryTime`**, **`BeforeFirstFrameMode.Full`**, optional **`idleHandlerTimeoutMs`**; **`:app` wires** `CompositeTaskTimingSink` + `defaultInterceptor` as in [§4.3](#43-startupmanager))
 
 The sample graph uses **mixed phases** (`logger` before first frame; `network` / `cache` after frames; `database` on idle) plus **DAG** parallelism where applicable. **Real device** times include **frame and idle** waits, not just task `delay`s.
 
@@ -295,7 +317,7 @@ The sample graph uses **mixed phases** (`logger` before first frame; `network` /
 
 ### 7.4 Testing
 
-- `TaskRegistry.clear()` between tests. Call **`InMemoryTaskTraceStore.reset()`** / your **`TaskTimingSink.reset()`** (or the **`StartupTracer`** singleton) between runs. Assert on **`FullStartupResult`** / **`PhaseResult`** when you inject failing tasks. Keep tasks small and **mock** SDKs inside `run()`.
+- Prefer **`withTestRegistry { … }`** and a local **`StartupTaskRegistry`**, or **`TaskRegistry.clear()`** if you use the global registry. Build **`StartupManager(tasks = registry.collectTasks(), …)`** or **`StartupManager(registry, …)`**. Call **`InMemoryTaskTraceStore.reset()`** / your **`TaskTimingSink.reset()`** (or the **`StartupTracer`** singleton) between runs. Assert on **`FullStartupResult`** / **`PhaseResult`** when you inject failing tasks. Keep tasks small and **mock** SDKs inside `run()`.
 
 ### 7.5 Multi-process
 
@@ -320,11 +342,14 @@ The sample graph uses **mixed phases** (`logger` before first frame; `network` /
 1. **Stable, unique `ids`**; dependencies must exist; **phase** order must not reference a “later” phase as a dependency.
 2. **Short** main-thread work; heavy work on IO and/or **`Idle`** phase.
 3. **No cycles** in the graph.
-4. **`TaskRegistry.collectTasks()`** creates new instances from `provide()` each time; avoid accidental shared **mutable** state between runs.
+4. **`collectTasks()`** on **`TaskRegistry`** or a **`StartupTaskRegistry`** creates new instances from `provide()` each time; avoid accidental shared **mutable** state between runs.
 5. **`priority`** does not override **edges**; it only reorders the ready queue.
 6. **Handle `PhaseResult.failures` and `FullStartupResult.allFailures` in production** (log, crash reporting, or feature flags). **`CancellationException` is rethrown** and should not be treated as a task failure.
 7. **Release:** disable or gate **`printDag`**, **`LogcatTaskTimingSink`** (use **`enabled`**), **`SampledTaskTimingSink`** for any analytics delegate, and **`TaskRunInterceptor`** (keep **`None`** or use **`defaultInterceptor(false)`**). Avoid verbose **failure** strings in user-facing paths.
 8. **`maxParallelIo`**: set from empirical testing (too low = underused cores; too high = storage or network **contention**).
+9. **Main `IdleHandler`:** if the main thread is **continuously** busy, **idle** may not fire for a long time. Use **`idleHandlerTimeoutMs` in `runPhasedStartup`** (or a similar app-level cap); this **does not** guarantee a true “idle” if the timeout wins—document the trade-off for your product.
+10. **Critical BFF and `needWait`:** only tasks in **`BeforeFirstFrame`** participate in the **closure**; if nothing matches **`isCritical`**, **`startBeforeFirstFrameUntilCritical`** returns an empty result—call **`startPhase(BeforeFirstFrame, …)`** for the full phase as needed.
+11. **Phased start policies:** use **`AtMostOncePerProcess` / `AtMostOncePerActivity`** when a **second** `Activity` or lifecycle entry must not re-run the whole chain; keep **`EveryTime`** for the benchmark / debug.
 
 ---
 
