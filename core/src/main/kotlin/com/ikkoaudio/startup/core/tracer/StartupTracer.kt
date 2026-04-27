@@ -1,27 +1,16 @@
 package com.ikkoaudio.startup.core.tracer
 
-import java.util.Collections
+import com.ikkoaudio.startup.core.diagnostics.InMemoryTaskTraceStore
 
-data class TaskTrace(
-    val id: String,
-    val costMs: Long,
-)
+/**
+ * Default process-wide in-memory [TaskTrace] store for demos and ad-hoc debugging.
+ * For production, prefer a dedicated [com.ikkoaudio.startup.core.diagnostics.InMemoryTaskTraceStore] instance
+ * passed to [com.ikkoaudio.startup.core.StartupManager], or a [com.ikkoaudio.startup.core.diagnostics.CompositeTaskTimingSink].
+ */
+object StartupTracer : InMemoryTaskTraceStore() {
+    @Deprecated("Use onTaskEnd", ReplaceWith("onTaskEnd(id, costMs)"))
+    fun record(id: String, costMs: Long) = onTaskEnd(id, costMs)
 
-object StartupTracer {
-    private val traces = Collections.synchronizedList(mutableListOf<TaskTrace>())
-
-    fun record(id: String, costMs: Long) {
-        traces.add(TaskTrace(id, costMs))
-    }
-
-    fun snapshot(): List<TaskTrace> = synchronized(traces) { traces.toList() }
-
-    fun clear() {
-        traces.clear()
-    }
-
-    fun print(sink: (String) -> Unit = { println(it) }) {
-        sink("\n===== Startup Trace =====")
-        snapshot().forEach { sink("${it.id} -> ${it.costMs} ms") }
-    }
+    @Deprecated("Use reset", ReplaceWith("reset()"))
+    fun clear() = reset()
 }

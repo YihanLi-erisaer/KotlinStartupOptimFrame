@@ -1,5 +1,10 @@
 package com.ikkoaudio.startup.core
 
+import com.ikkoaudio.startup.core.diagnostics.AndroidTraceTaskRunInterceptor
+import com.ikkoaudio.startup.core.diagnostics.CompositeTaskTimingSink
+import com.ikkoaudio.startup.core.diagnostics.InMemoryTaskTraceStore
+import com.ikkoaudio.startup.core.diagnostics.TaskRunInterceptor
+import com.ikkoaudio.startup.core.diagnostics.TaskTimingSink
 import com.ikkoaudio.startup.core.tracer.StartupTracer
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -20,11 +25,9 @@ private sealed class TaskOutcome {
 class StartupManager(
     private val tasks: List<StartupTask>,
     private val dispatcher: StartupDispatcher = StartupDispatcher(),
-    /**
-     * Limits **concurrent** non–main-thread tasks (each [StartupTask.run] still uses [Dispatchers.IO] or main).
-     * Main-thread tasks are not limited by this semaphore. `null` = no limit.
-     */
     private val maxParallelIo: Int? = null,
+    private val taskTiming: TaskTimingSink = StartupTracer,
+    private val runInterceptor: TaskRunInterceptor = TaskRunInterceptor.None,
 ) {
     private val ioPermits: Semaphore? =
         maxParallelIo?.coerceIn(1, 10_000)?.let { Semaphore(it) }
@@ -36,14 +39,19 @@ class StartupManager(
     }
 
     /**
-     * Runs every [ExecutionPhase] in order in a single [kotlinx.coroutines.coroutineScope] (no real frame/idle gating).
-     * Returns a summary; the first failure does **not** cancel other tasks in the same phase (supervisor semantics).
+     * Optional factory for release defaults: in-memory + Logcat in debug, Android systrace sections in debug.
+     * Override as needed in your app module.
      */
+    companion object {
+        fun defaultInterceptor(debug: Boolean): TaskRunInterceptor =
+            if (debug) AndroidTraceTaskRunInterceptor() else TaskRunInterceptor.None
+    }
+
     suspend fun start(
         printDag: Boolean = true,
         sink: (String) -> Unit = { println(it) },
     ): FullStartupResult = coroutineScope {
-        StartupTracer.clear()
+        taskTiming.reset()
         var satisfied: Set<String> = emptySet()
         var failed: Set<String> = emptySet()
         val byPhase = linkedMapOf<ExecutionPhase, PhaseResult>()
@@ -63,19 +71,29 @@ class StartupManager(
         }
         val summary = FullStartupResult(byPhase)
         if (summary.isOverallSuccess) {
-            StartupTracer.print(sink)
+            printInMemoryTracesTo(sink)
         } else {
             sink("\n===== Startup: some tasks failed =====")
             summary.allFailures.forEach { sink("FAILED ${it.taskId}: ${it.error.message}") }
-            if (StartupTracer.snapshot().isNotEmpty()) StartupTracer.print(sink)
+            if (hasAnyInMemoryTraces()) printInMemoryTracesTo(sink)
         }
         summary
     }
 
-    /**
-     * @param satisfiedFromEarlier task ids that **successfully** completed in earlier [ExecutionPhase] runs
-     * @param failedFromEarlier task ids whose [run] threw (or were recorded as failed); dependents are skipped
-     */
+    private fun hasAnyInMemoryTraces(): Boolean = when (val t = taskTiming) {
+        is InMemoryTaskTraceStore -> t.snapshot().isNotEmpty()
+        is CompositeTaskTimingSink -> t.sinks.any { (it as? InMemoryTaskTraceStore)?.snapshot()?.isNotEmpty() == true }
+        else -> false
+    }
+
+    private fun printInMemoryTracesTo(sink: (String) -> Unit) {
+        when (val t = taskTiming) {
+            is InMemoryTaskTraceStore -> t.printTo(sink)
+            is CompositeTaskTimingSink -> t.sinks.filterIsInstance<InMemoryTaskTraceStore>().firstOrNull()?.printTo(sink)
+            else -> {}
+        }
+    }
+
     suspend fun startPhase(
         phase: ExecutionPhase,
         satisfiedFromEarlier: Set<String> = emptySet(),
@@ -84,7 +102,7 @@ class StartupManager(
         sink: (String) -> Unit = { println(it) },
         clearTracer: Boolean = false,
     ): PhaseResult = supervisorScope {
-        if (clearTracer) StartupTracer.clear()
+        if (clearTracer) taskTiming.reset()
 
         val (sorted, planSkipped) = planRunnableTasksInPhase(phase, tasks, satisfiedFromEarlier, failedFromEarlier)
         if (printDag) printDAG(sorted, sink)
@@ -129,17 +147,20 @@ class StartupManager(
 
                 val startMs = System.currentTimeMillis()
                 try {
-                    if (task.runOnMainThread) {
-                        dispatcher.execute(task)
-                    } else {
-                        if (ioPermits != null) {
-                            ioPermits.withPermit { dispatcher.execute(task) }
-                        } else {
+                    runInterceptor.intercept(task) {
+                        if (task.runOnMainThread) {
                             dispatcher.execute(task)
+                        } else {
+                            if (ioPermits != null) {
+                                ioPermits.withPermit { dispatcher.execute(task) }
+                            } else {
+                                dispatcher.execute(task)
+                            }
                         }
                     }
                     outcomes[task.id] = TaskOutcome.Success
-                    StartupTracer.record(task.id, System.currentTimeMillis() - startMs)
+                    val costMs = System.currentTimeMillis() - startMs
+                    taskTiming.onTaskEnd(task.id, costMs)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {

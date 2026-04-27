@@ -24,6 +24,8 @@ import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonRes
 import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonScreen
 import com.ikkoaudio.startup.core.StartupManager
 import com.ikkoaudio.startup.core.TaskRegistry
+import com.ikkoaudio.startup.core.diagnostics.CompositeTaskTimingSink
+import com.ikkoaudio.startup.core.diagnostics.LogcatTaskTimingSink
 import com.ikkoaudio.startup.core.tracer.StartupTracer
 import kotlin.system.measureTimeMillis
 
@@ -42,13 +44,22 @@ class MainActivity : ComponentActivity() {
                         val naiveMs = measureTimeMillis {
                             runNaiveJetpackStyleStartup(TaskRegistry.collectTasks())
                         }
-                        StartupTracer.clear()
+                        StartupTracer.reset()
                         val frameworkMs = measureTimeMillis {
                             runPhasedStartup(
                                 this@MainActivity,
                                 StartupManager(
                                     tasks = TaskRegistry.collectTasks(),
                                     maxParallelIo = 4,
+                                    taskTiming = CompositeTaskTimingSink(
+                                        listOf(
+                                            StartupTracer,
+                                            LogcatTaskTimingSink(enabled = { BuildConfig.DEBUG }),
+                                        ),
+                                    ),
+                                    runInterceptor = StartupManager.defaultInterceptor(
+                                        BuildConfig.DEBUG,
+                                    ),
                                 ),
                             )
                         }

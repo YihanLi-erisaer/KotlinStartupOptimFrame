@@ -16,6 +16,10 @@ import kotlinx.coroutines.withContext
  * [Choreographer] frame callbacks, then [ExecutionPhase.AfterFirstFrame], then a main [Looper] idle
  * pass, then [ExecutionPhase.Idle].
  *
+ * [Choreographer.getInstance] and [Looper.myQueue] are tied to the **main** thread’s looper.
+ * [awaitChoreographerFrames] and [awaitMainLooperIdle] therefore **always** `withContext(Dispatchers.Main.immediate)`,
+ * so it is **safe to call** [runPhasedStartup] from **any** dispatcher; do not assume callers already run on main.
+ *
  * Call this from a scope that is **cancelled when the activity is destroyed** (e.g.
  * [androidx.lifecycle.lifecycleScope] or [androidx.lifecycle.repeatOnLifecycle]) so init work stops
  * when the UI goes away. [ComponentActivity] is kept for API symmetry and future hooks
@@ -46,24 +50,24 @@ suspend fun runPhasedStartup(
         runPhaseOnIo(ExecutionPhase.BeforeFirstFrame)
     }
     ensureActive()
-    withContext(Dispatchers.Main.immediate) {
-        awaitChoreographerFrames(2)
-    }
+    awaitChoreographerFrames(2)
     ensureActive()
     withContext(Dispatchers.Default) {
         runPhaseOnIo(ExecutionPhase.AfterFirstFrame)
     }
     ensureActive()
-    withContext(Dispatchers.Main.immediate) {
-        awaitMainLooperIdle()
-    }
+    awaitMainLooperIdle()
     ensureActive()
     withContext(Dispatchers.Default) {
         runPhaseOnIo(ExecutionPhase.Idle)
     }
 }
 
-private suspend fun awaitChoreographerFrames(count: Int) {
+/**
+ * Waits for [count] vsync-pulse frame callbacks. **Must** run on the main looper: this function
+ * enforces that by dispatching to [Dispatchers.Main.immediate].
+ */
+private suspend fun awaitChoreographerFrames(count: Int) = withContext(Dispatchers.Main.immediate) {
     require(count > 0)
     val choreographer = Choreographer.getInstance()
     repeat(count) {
@@ -73,9 +77,15 @@ private suspend fun awaitChoreographerFrames(count: Int) {
     }
 }
 
-private suspend fun awaitMainLooperIdle() = suspendCoroutine { cont ->
-    Looper.myQueue().addIdleHandler {
-        cont.resume(Unit)
-        false
+/**
+ * Resumes after the main message queue is idle. **Must** use the main looper’s [android.os.MessageQueue];
+ * enforced via [Dispatchers.Main.immediate].
+ */
+private suspend fun awaitMainLooperIdle() = withContext(Dispatchers.Main.immediate) {
+    suspendCoroutine { cont ->
+        Looper.myQueue().addIdleHandler {
+            cont.resume(Unit)
+            false
+        }
     }
 }
