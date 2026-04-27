@@ -355,7 +355,7 @@ The sample graph uses **mixed phases** (`logger` before first frame; `network` /
 
 ## 10. License
 
-If there is no `LICENSE` file in the root of your fork, add an explicit open-source or proprietary license before distribution.
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 
