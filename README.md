@@ -1,6 +1,6 @@
 # Android Startup Optimization Framework
 
-A Kotlin/Android library for **cold-start and pre–first-frame initialization**. It models startup work as a **directed acyclic graph (DAG)** of tasks, runs **independent branches in parallel** once their dependencies are satisfied (shortening wall-clock time toward the **critical path**), and provides registration, structured coroutine dispatch, **execution phases** (decouple from the first frame), **supervisor-style failure handling** (one task failure does not cancel siblings), **optional IO concurrency limits**, timing traces, and runtime wrappers (lazy once, timeout, priority override).
+A Kotlin/Android library for **cold-start and pre–first-frame initialization**. It models startup work as a **directed acyclic graph (DAG)** of tasks, runs **independent branches in parallel** once their dependencies are satisfied (shortening wall-clock time toward the **critical path**), and provides registration, structured coroutine dispatch, **execution phases** (decouple from the first frame), **supervisor-style failure handling** (one task failure does not cancel siblings), **optional IO concurrency limits**, **injectable timing sinks** (`TaskTimingSink`) and **per-task run interceptors** (e.g. Android `Trace` / systrace), and runtime wrappers (lazy once, timeout, priority override).
 
 **Demo app:** `:app` · **Modules:** `:core` (engine), `:runtime` (optional wrappers), `:sample` (example tasks).
 
@@ -69,9 +69,10 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 `StartupManager` launches one **`Job` per task** in topological order for that phase. Inside each job:
 
 1. For each `dependency` that is not already **satisfied from earlier successful phases**, **`join`** the corresponding **same-phase** `Job`, then check that dependency’s **outcome** (if it **failed**, this task is **skipped** and does not run `run()`).
-2. **`StartupDispatcher.execute(task)`** runs `task.run()` in **`withContext`(`Main.immediate` or `IO`)** so exceptions are observable in the parent coroutine.
-3. Non–main-thread work can be wrapped in **`Semaphore.withPermit`** when [`maxParallelIo`](#43-startupmanager) is set, to cap concurrent IO-style tasks.
-4. **All** jobs in the phase are **joined** at the end of that phase.
+2. A **`TaskRunInterceptor`** (default **no-op**) wraps the successful path: it calls your **`execute`** block, which in turn runs **`StartupDispatcher.execute(task)`** (so you can add **Android `Trace.beginSection` / `endSection`**, or custom hooks, per task). See [§2.8](#28-observability).
+3. **`StartupDispatcher.execute(task)`** runs `task.run()` in **`withContext`(`Main.immediate` or `IO`)** so exceptions are observable in the parent coroutine.
+4. Non–main-thread work can be wrapped in **`Semaphore.withPermit`** when [`maxParallelIo`](#43-startupmanager) is set, to cap concurrent IO-style tasks.
+5. **All** jobs in the phase are **joined** at the end of that phase.
 
 **Why launch in topological order?** So predecessor `Job`s exist before a dependent could suspend waiting for them, avoiding a **deadlock** from scheduling order.
 
@@ -89,7 +90,9 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 
 - **`StartupManager.start()`** runs **all non-empty phases in order** in one **`suspend` coroutine** (no real “wait for frame” between phases—suitable for tests or total work measurement).
 - **`StartupManager.startPhase(phase, …)`** runs **one** phase; you call it from the app after **frames** or **idle** as needed.
-- The demo [`runPhasedStartup`](app/src/main/kotlin/com/ikkoaudio/androidstartupoptimizationframework/startup/PhasedStartup.kt) chains `startPhase(BeforeFirstFrame)` → 2 frame callbacks → `startPhase(AfterFirstFrame)` → idle → `startPhase(Idle)`.
+- The demo [`runPhasedStartup`](app/src/main/kotlin/com/ikkoaudio/androidstartupoptimizationframework/startup/PhasedStartup.kt) chains `startPhase(BeforeFirstFrame)` (on a worker dispatcher) → 2 **Choreographer** frame callbacks → `startPhase(AfterFirstFrame)` → main **idle** → `startPhase(Idle)`.
+
+**Choreographer and the main `Looper`:** frame callbacks and `Looper.myQueue()` are tied to the **main** thread. The helpers that wait for frames or for **idle** use **`withContext(Dispatchers.Main.immediate)`** internally, so **`runPhasedStartup` is safe to call from any coroutine** (e.g. `Default`); you do not have to pre-switch to the main dispatcher.
 
 `StartupTask` exposes `executionPhase` (default **`BeforeFirstFrame`**).
 
@@ -110,7 +113,18 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 
 ### 2.8 Observability
 
-`StartupTracer` records **per-successful-task** wall time around `run()` when it completes without failure. On partial failure, the manager may still print available traces. Suitable for **debug** dashboards; not a full distributed trace.
+**Per-task wall time (after a successful `run()`):** inject a [`TaskTimingSink`](core/src/main/kotlin/com/ikkoaudio/startup/core/diagnostics/TaskTimingSink.kt) via **`StartupManager(..., taskTiming = …)`**. Defaults to the process-wide in-memory object [`StartupTracer`](core/src/main/kotlin/com/ikkoaudio/startup/core/tracer/StartupTracer.kt) (extends [`InMemoryTaskTraceStore`](core/src/main/kotlin/com/ikkoaudio/startup/core/diagnostics/InMemoryTaskTraceStore.kt)).
+
+- **`InMemoryTaskTraceStore`** — thread-safe list for debug UIs; **`onTaskEnd`**, **`reset`**, **`snapshot()`**, **`printTo`**.  
+- **`LogcatTaskTimingSink`** — `Log.d` per task; use **`enabled = { BuildConfig.DEBUG }`** (or a feature flag) so **release** stays quiet.  
+- **`CompositeTaskTimingSink(sinks)`** — fan out to several sinks (e.g. in-memory + Logcat).  
+- **`SampledTaskTimingSink(delegate, sampleProbability)`** — forward a **fraction** of events (e.g. `0.01` in production for cheap telemetry).
+
+`StartupManager.start` / `startPhase` call **`reset()`** on the sink when appropriate; success paths can **print** in-memory traces to a `sink: (String) -> Unit` (same hook as `println` in the API).
+
+**Systrace / Perfetto (system trace):** inject **`TaskRunInterceptor`**. The built-in [`AndroidTraceTaskRunInterceptor`](core/src/main/kotlin/com/ikkoaudio/startup/core/diagnostics/AndroidTraceTaskRunInterceptor.kt) wraps each task body with [`Trace.beginSection` / `endSection`](https://developer.android.com/reference/android/os/Trace) (labels truncated to 127 bytes). Use **`TaskRunInterceptor.None`** (default) in **release** or when tracing is off. A convenience is **`StartupManager.defaultInterceptor(BuildConfig.DEBUG)`** — `AndroidTraceTaskRunInterceptor` in debug, **no-op** in release (see **`MainActivity`** in `:app`).
+
+This is **not** a full distributed trace; for production, combine **sampling** + **gated** Logcat and optional **A/B** on interceptors.
 
 ---
 
@@ -118,7 +132,7 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 
 | Module | Role |
 |--------|------|
-| **`core`** | `StartupTask`, `ExecutionPhase`, `StartupTaskProvider`, `TaskRegistry`, `Dag` (`sortTasks`, `planRunnableTasksInPhase`, …), `StartupDispatcher`, `StartupManager`, `StartupResult` (`PhaseResult`, `FullStartupResult`, …), `StartupTracer` |
+| **`core`** | `StartupTask`, `ExecutionPhase`, `StartupTaskProvider`, `TaskRegistry`, `Dag` (`sortTasks`, `planRunnableTasksInPhase`, …), `StartupDispatcher`, `StartupManager`, `StartupResult` (`PhaseResult`, `FullStartupResult`, …), `StartupTracer` / `InMemoryTaskTraceStore`, `TaskTimingSink` + `LogcatTaskTimingSink` / `CompositeTaskTimingSink` / `SampledTaskTimingSink`, `TaskRunInterceptor` + `AndroidTraceTaskRunInterceptor` |
 | **`runtime`** | Optional wrappers: `LazyTask`, `TimeoutTask`, `PriorityTask` (delegate `executionPhase` too) |
 | **`sample`** | Example `Init*` tasks (mixed phases) and `CoreTaskProvider` |
 | **`app`** | `Application` registration, Compose UI, `runPhasedStartup`, benchmark |
@@ -152,7 +166,15 @@ The **optimization** does not reduce a single `run()`’s own duration; it **red
 val manager = StartupManager(
     tasks = TaskRegistry.collectTasks(),
     maxParallelIo = 4, // optional cap for concurrent non–main tasks; omit or null = unlimited
+    taskTiming = CompositeTaskTimingSink(
+        listOf(
+            StartupTracer,
+            LogcatTaskTimingSink(enabled = { BuildConfig.DEBUG }),
+        ),
+    ),
+    runInterceptor = StartupManager.defaultInterceptor(BuildConfig.DEBUG),
 )
+// Omit `taskTiming` and `runInterceptor` to use defaults: `StartupTracer` + `TaskRunInterceptor.None`.
 
 // Run all phases back-to-back in one coroutine (suspending); returns summary
 val result: FullStartupResult = manager.start(printDag = true) { line -> Log.d("Startup", line) }
@@ -183,7 +205,7 @@ val phase: PhaseResult = manager.startPhase(
 
 ### 4.6 Phased startup helper (`app` sample)
 
-- **`runPhasedStartup(activity, manager)`** — runs the three **phases** with **two Choreographer frame callbacks** and a **main Looper** `IdleHandler` between phases, and uses **`ensureActive()`** between steps so a **cancelled** scope (e.g. when the `Activity` is destroyed) stops starting further phases.
+- **`runPhasedStartup(activity, manager)`** — runs the three **phases** with **two Choreographer frame callbacks** and a **main Looper** `IdleHandler` between phases, and uses **`ensureActive()`** between steps so a **cancelled** scope (e.g. when the `Activity` is destroyed) stops starting further phases. Frame/idle waiters run on **`Dispatchers.Main.immediate`** inside the helper (see [§2.4](#24-execution-phases)).
 
 ---
 
@@ -216,7 +238,12 @@ class MyApplication : Application() {
 
 ```kotlin
 suspend fun runAllPhasesInOneBlock() {
-    val manager = StartupManager(TaskRegistry.collectTasks(), maxParallelIo = 4)
+    val manager = StartupManager(
+        tasks = TaskRegistry.collectTasks(),
+        maxParallelIo = 4,
+        taskTiming = StartupTracer, // or CompositeTaskTimingSink(…) — see §2.8
+        runInterceptor = TaskRunInterceptor.None,
+    )
     val result = manager.start(printDag = BuildConfig.DEBUG)
     if (!result.isOverallSuccess) { /* log result.allFailures */ }
 }
@@ -241,7 +268,7 @@ Run the **`app`** configuration in Android Studio.
 The **comparison screen** measures:
 
 1. **Naive sequential total** — `measureTimeMillis { runNaiveJetpackStyleStartup(...) }`
-2. **Framework total** — `measureTimeMillis { runPhasedStartup(MainActivity, StartupManager(..., maxParallelIo = 4)) }` (real first-frame / idle gating, IO cap **4**)
+2. **Framework total** — `measureTimeMillis { runPhasedStartup(MainActivity, StartupManager(..., maxParallelIo = 4, taskTiming = …, runInterceptor = …)) }` (real first-frame / idle gating, IO cap **4**; **`:app` wires** `CompositeTaskTimingSink` + `defaultInterceptor` as in [§4.3](#43-startupmanager))
 
 The sample graph uses **mixed phases** (`logger` before first frame; `network` / `cache` after frames; `database` on idle) plus **DAG** parallelism where applicable. **Real device** times include **frame and idle** waits, not just task `delay`s.
 
@@ -268,7 +295,7 @@ The sample graph uses **mixed phases** (`logger` before first frame; `network` /
 
 ### 7.4 Testing
 
-- `TaskRegistry.clear()` between tests. Assert on **`FullStartupResult`** / **`PhaseResult`** when you inject failing tasks. Keep tasks small and **mock** SDKs inside `run()`.
+- `TaskRegistry.clear()` between tests. Call **`InMemoryTaskTraceStore.reset()`** / your **`TaskTimingSink.reset()`** (or the **`StartupTracer`** singleton) between runs. Assert on **`FullStartupResult`** / **`PhaseResult`** when you inject failing tasks. Keep tasks small and **mock** SDKs inside `run()`.
 
 ### 7.5 Multi-process
 
@@ -296,7 +323,7 @@ The sample graph uses **mixed phases** (`logger` before first frame; `network` /
 4. **`TaskRegistry.collectTasks()`** creates new instances from `provide()` each time; avoid accidental shared **mutable** state between runs.
 5. **`priority`** does not override **edges**; it only reorders the ready queue.
 6. **Handle `PhaseResult.failures` and `FullStartupResult.allFailures` in production** (log, crash reporting, or feature flags). **`CancellationException` is rethrown** and should not be treated as a task failure.
-7. **Release:** disable or gate **`printDag`**, **`StartupTracer.print`**, and verbose **failure** strings as appropriate.
+7. **Release:** disable or gate **`printDag`**, **`LogcatTaskTimingSink`** (use **`enabled`**), **`SampledTaskTimingSink`** for any analytics delegate, and **`TaskRunInterceptor`** (keep **`None`** or use **`defaultInterceptor(false)`**). Avoid verbose **failure** strings in user-facing paths.
 8. **`maxParallelIo`**: set from empirical testing (too low = underused cores; too high = storage or network **contention**).
 
 ---
