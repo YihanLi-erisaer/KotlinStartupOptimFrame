@@ -8,33 +8,58 @@ import com.ikkoaudio.startup.core.StartupManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
  * Production-style execution: [ExecutionPhase.BeforeFirstFrame] first, then two
  * [Choreographer] frame callbacks, then [ExecutionPhase.AfterFirstFrame], then a main [Looper] idle
  * pass, then [ExecutionPhase.Idle].
+ *
+ * Call this from a scope that is **cancelled when the activity is destroyed** (e.g.
+ * [androidx.lifecycle.lifecycleScope] or [androidx.lifecycle.repeatOnLifecycle]) so init work stops
+ * when the UI goes away. [ComponentActivity] is kept for API symmetry and future hooks
+ * (e.g. [android.app.Activity.reportFullyDrawn]).
  */
 suspend fun runPhasedStartup(
     @Suppress("UNUSED_PARAMETER")
     activity: ComponentActivity,
     manager: StartupManager,
 ) {
-    var completed = emptySet<String>()
-    completed = withContext(Dispatchers.Default) {
-        manager.startPhase(ExecutionPhase.BeforeFirstFrame, completed, printDag = false, clearTracer = false)
+    var satisfied: Set<String> = emptySet()
+    var failed: Set<String> = emptySet()
+
+    suspend fun runPhaseOnIo(phase: ExecutionPhase) {
+        val pr = manager.startPhase(
+            phase = phase,
+            satisfiedFromEarlier = satisfied,
+            failedFromEarlier = failed,
+            printDag = false,
+            clearTracer = false,
+        )
+        satisfied = satisfied + pr.successTaskIds
+        failed = failed + pr.failures.map { it.taskId }.toSet()
     }
+
+    ensureActive()
+    withContext(Dispatchers.Default) {
+        runPhaseOnIo(ExecutionPhase.BeforeFirstFrame)
+    }
+    ensureActive()
     withContext(Dispatchers.Main.immediate) {
         awaitChoreographerFrames(2)
     }
-    completed = withContext(Dispatchers.Default) {
-        manager.startPhase(ExecutionPhase.AfterFirstFrame, completed, printDag = false, clearTracer = false)
+    ensureActive()
+    withContext(Dispatchers.Default) {
+        runPhaseOnIo(ExecutionPhase.AfterFirstFrame)
     }
+    ensureActive()
     withContext(Dispatchers.Main.immediate) {
         awaitMainLooperIdle()
     }
+    ensureActive()
     withContext(Dispatchers.Default) {
-        manager.startPhase(ExecutionPhase.Idle, completed, printDag = false, clearTracer = false)
+        runPhaseOnIo(ExecutionPhase.Idle)
     }
 }
 

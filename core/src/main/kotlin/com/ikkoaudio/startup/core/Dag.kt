@@ -18,15 +18,48 @@ fun validateDependencyPhases(tasks: List<StartupTask>) {
 }
 
 /**
- * Topological order for tasks in [phase] only. In-degrees count only dependencies that are also in this phase;
- * dependencies listed in [completedTaskIds] are treated as already finished and do not add edges.
+ * Drop tasks in [phase] that transitively cannot run because a dependency is in [failedTaskIds], and topologically
+ * sort the rest. [satisfiedFromEarlier] lists ids that **successfully** completed in a previous [ExecutionPhase].
  */
-fun sortTasksForPhase(
+fun planRunnableTasksInPhase(
     phase: ExecutionPhase,
     allTasks: List<StartupTask>,
-    completedTaskIds: Set<String>,
+    satisfiedFromEarlier: Set<String>,
+    failedTaskIds: Set<String>,
+): Pair<List<StartupTask>, List<SkippedTask>> {
+    val inPhase = allTasks.filter { it.executionPhase == phase }
+    if (inPhase.isEmpty()) return emptyList<StartupTask>() to emptyList()
+
+    val skipped = mutableListOf<SkippedTask>()
+    val toRun = inPhase.mapNotNull { task ->
+        val failedDep = task.dependencies.firstOrNull { it in failedTaskIds }
+        if (failedDep != null) {
+            skipped.add(
+                SkippedTask(
+                    taskId = task.id,
+                    reason = "dependency $failedDep failed or was skipped",
+                ),
+            )
+            null
+        } else {
+            task
+        }
+    }
+    if (toRun.isEmpty()) return emptyList() to skipped
+
+    val sorted = sortTasksInPhaseList(phase, toRun, satisfiedFromEarlier)
+    return sorted to skipped
+}
+
+/**
+ * Topological order for a **pre-filtered** list of tasks that share the same [phase], with dependencies satisfied
+ * from [satisfiedFromEarlier] or the same list.
+ */
+fun sortTasksInPhaseList(
+    phase: ExecutionPhase,
+    phaseTasks: List<StartupTask>,
+    satisfiedFromEarlier: Set<String>,
 ): List<StartupTask> {
-    val phaseTasks = allTasks.filter { it.executionPhase == phase }
     if (phaseTasks.isEmpty()) return emptyList()
 
     val phaseIds = phaseTasks.map { it.id }.toSet()
@@ -42,12 +75,12 @@ fun sortTasksForPhase(
     for (task in phaseTasks) {
         for (dep in task.dependencies) {
             when {
-                dep in completedTaskIds -> { /* satisfied */ }
+                dep in satisfiedFromEarlier -> { /* edge from satisfied — no in-phase in-degree from dep */ }
                 dep in phaseIds -> {
                     graph.getValue(dep).add(task.id)
                     inDegree[task.id] = inDegree.getValue(task.id) + 1
                 }
-                else -> error("Task '${task.id}' depends on '$dep' which is neither completed nor in phase $phase")
+                else -> error("Task '${task.id}' depends on '$dep' which is neither in satisfied earlier phases nor in this phase $phase (deps must succeed before dependents run)")
             }
         }
     }

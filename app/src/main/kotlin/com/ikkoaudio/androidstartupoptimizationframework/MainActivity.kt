@@ -15,10 +15,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.ikkoaudio.androidstartupoptimizationframework.benchmark.runNaiveJetpackStyleStartup
+import com.ikkoaudio.androidstartupoptimizationframework.startup.runPhasedStartup
 import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonResult
 import com.ikkoaudio.androidstartupoptimizationframework.ui.StartupComparisonScreen
-import com.ikkoaudio.androidstartupoptimizationframework.startup.runPhasedStartup
 import com.ikkoaudio.startup.core.StartupManager
 import com.ikkoaudio.startup.core.TaskRegistry
 import com.ikkoaudio.startup.core.tracer.StartupTracer
@@ -31,27 +34,33 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
+                val lifecycle = LocalLifecycleOwner.current.lifecycle
                 var comparison by remember { mutableStateOf<StartupComparisonResult?>(null) }
 
-                LaunchedEffect(Unit) {
-                    val naiveMs = measureTimeMillis {
-                        runNaiveJetpackStyleStartup(TaskRegistry.collectTasks())
-                    }
-                    StartupTracer.clear()
-                    val frameworkMs = measureTimeMillis {
-                        runPhasedStartup(
-                            this@MainActivity,
-                            StartupManager(TaskRegistry.collectTasks()),
+                LaunchedEffect(lifecycle) {
+                    lifecycle.repeatOnLifecycle(Lifecycle.State.CREATED) {
+                        val naiveMs = measureTimeMillis {
+                            runNaiveJetpackStyleStartup(TaskRegistry.collectTasks())
+                        }
+                        StartupTracer.clear()
+                        val frameworkMs = measureTimeMillis {
+                            runPhasedStartup(
+                                this@MainActivity,
+                                StartupManager(
+                                    tasks = TaskRegistry.collectTasks(),
+                                    maxParallelIo = 4,
+                                ),
+                            )
+                        }
+                        val traces = StartupTracer.snapshot()
+                        val tasksForUi = TaskRegistry.collectTasks()
+                        comparison = StartupComparisonResult(
+                            naiveSequentialTotalMs = naiveMs,
+                            frameworkTotalMs = frameworkMs,
+                            tasks = tasksForUi,
+                            frameworkTraces = traces,
                         )
                     }
-                    val traces = StartupTracer.snapshot()
-                    val tasksForUi = TaskRegistry.collectTasks()
-                    comparison = StartupComparisonResult(
-                        naiveSequentialTotalMs = naiveMs,
-                        frameworkTotalMs = frameworkMs,
-                        tasks = tasksForUi,
-                        frameworkTraces = traces,
-                    )
                 }
 
                 when (val c = comparison) {
