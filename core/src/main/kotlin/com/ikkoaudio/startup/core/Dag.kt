@@ -19,19 +19,36 @@ fun validateDependencyPhases(tasks: List<StartupTask>) {
 
 /**
  * Drop tasks in [phase] that transitively cannot run because a dependency is in [failedTaskIds], and topologically
- * sort the rest. [satisfiedFromEarlier] lists ids that **successfully** completed in a previous [ExecutionPhase].
+ * sort the rest.
+ *
+ * [satisfiedFromEarlier] lists ids that **already succeeded** — including from **earlier execution phases** or
+ * from a **previous partial run** of this same [phase] (e.g. after [StartupManager.startBeforeFirstFrameUntilCritical]).
+ * Those tasks are not scheduled again.
+ *
+ * [onlyInPhaseTaskIds], if non-null, restricts this run to the given **subset** of task ids in [phase] (e.g. the
+ * critical path closure in [BeforeFirstFrame][ExecutionPhase.BeforeFirstFrame]).
  */
 fun planRunnableTasksInPhase(
     phase: ExecutionPhase,
     allTasks: List<StartupTask>,
     satisfiedFromEarlier: Set<String>,
     failedTaskIds: Set<String>,
+    onlyInPhaseTaskIds: Set<String>? = null,
 ): Pair<List<StartupTask>, List<SkippedTask>> {
     val inPhase = allTasks.filter { it.executionPhase == phase }
     if (inPhase.isEmpty()) return emptyList<StartupTask>() to emptyList()
 
+    val inScope = if (onlyInPhaseTaskIds != null) {
+        inPhase.filter { it.id in onlyInPhaseTaskIds }
+    } else {
+        inPhase
+    }
+
     val skipped = mutableListOf<SkippedTask>()
-    val toRun = inPhase.mapNotNull { task ->
+    val toRun = inScope.mapNotNull { task ->
+        if (task.id in satisfiedFromEarlier) {
+            return@mapNotNull null
+        }
         val failedDep = task.dependencies.firstOrNull { it in failedTaskIds }
         if (failedDep != null) {
             skipped.add(

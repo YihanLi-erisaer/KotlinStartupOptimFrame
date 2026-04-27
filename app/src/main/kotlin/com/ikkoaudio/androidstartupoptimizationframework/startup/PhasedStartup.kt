@@ -1,37 +1,86 @@
 package com.ikkoaudio.androidstartupoptimizationframework.startup
 
+import android.os.Build
 import android.os.Looper
 import android.view.Choreographer
 import androidx.activity.ComponentActivity
+import com.ikkoaudio.androidstartupoptimizationframework.R
 import com.ikkoaudio.startup.core.ExecutionPhase
 import com.ikkoaudio.startup.core.StartupManager
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 /**
- * Production-style execution: [ExecutionPhase.BeforeFirstFrame] first, then two
- * [Choreographer] frame callbacks, then [ExecutionPhase.AfterFirstFrame], then a main [Looper] idle
- * pass, then [ExecutionPhase.Idle].
- *
- * [Choreographer.getInstance] and [Looper.myQueue] are tied to the **main** thread’s looper.
- * [awaitChoreographerFrames] and [awaitMainLooperIdle] therefore **always** `withContext(Dispatchers.Main.immediate)`,
- * so it is **safe to call** [runPhasedStartup] from **any** dispatcher; do not assume callers already run on main.
- *
- * Call this from a scope that is **cancelled when the activity is destroyed** (e.g.
- * [androidx.lifecycle.lifecycleScope] or [androidx.lifecycle.repeatOnLifecycle]) so init work stops
- * when the UI goes away. [ComponentActivity] is kept for API symmetry and future hooks
- * (e.g. [android.app.Activity.reportFullyDrawn]).
+ * When to run [ExecutionPhase.BeforeFirstFrame]: all tasks in one [StartupManager.startPhase], or
+ * [StartupManager.startBeforeFirstFrameUntilCritical] then the remainder (see [runPhasedStartup]).
+ */
+enum class BeforeFirstFrameMode {
+    /** Single [StartupManager.startPhase] for the whole [BeforeFirstFrame] phase. */
+    Full,
+
+    /**
+     * [StartupManager.startBeforeFirstFrameUntilCritical] (default: [com.ikkoaudio.startup.core.StartupTask.needWait]),
+     * then a second [StartupManager.startPhase] for remaining tasks in that phase.
+     */
+    CriticalThenRemaining,
+}
+
+/**
+ * **First frame** and **one-shot** behavior:
+ * - For **“fully drawn”** / [android.app.Activity.reportFullyDrawn], use [onAfterVsync] after [Choreographer] frames
+ *   (default implementation).
+ * - For **Window / decor** hooks, set [onWindowReady] to run on the main thread at the start of
+ *   [runPhasedStartup] (e.g. [android.view.View.getViewTreeObserver] or [androidx.core.view.ViewKt.doOnPreDraw]).
+ * - To also align with [androidx.lifecycle.ProcessLifecycleOwner], add an observer in [android.app.Application]
+ *   and avoid calling [runPhasedStartup] from more than one place, or use [PhasedStartupRunPolicy].
+ */
+enum class PhasedStartupRunPolicy {
+    /** Run every time (e.g. benchmarks). */
+    EveryTime,
+    /** At most one run per process. */
+    AtMostOncePerProcess,
+    /** At most one run per [ComponentActivity] instance ([android.view.View] tag on the decor). */
+    AtMostOncePerActivity,
+}
+
+/**
+ * [Choreographer] and [Looper.myQueue] are main-looper; helpers use [Dispatchers.Main.immediate].  
+ * [android.os.MessageQueue.addIdleHandler] can wait indefinitely if the main thread never idles; use
+ * [idleHandlerTimeoutMs] to **also** continue after a bounded delay (not equivalent to true idle when the UI is
+ * always busy).
  */
 suspend fun runPhasedStartup(
-    @Suppress("UNUSED_PARAMETER")
     activity: ComponentActivity,
     manager: StartupManager,
+    runPolicy: PhasedStartupRunPolicy = PhasedStartupRunPolicy.EveryTime,
+    beforeFirstFrameMode: BeforeFirstFrameMode = BeforeFirstFrameMode.Full,
+    idleHandlerTimeoutMs: Long? = 2_000L,
+    onAfterVsync: (ComponentActivity) -> Unit = { a ->
+        if (Build.VERSION.SDK_INT >= 19) {
+            a.reportFullyDrawn()
+        }
+    },
+    onWindowReady: (ComponentActivity) -> Unit = { },
 ) {
+    if (!enterRunIfAllowedByPolicy(activity, runPolicy)) return
+
+    withContext(Dispatchers.Main.immediate) {
+        onWindowReady(activity)
+    }
+
     var satisfied: Set<String> = emptySet()
     var failed: Set<String> = emptySet()
+
+    fun mergeFrom(pr: com.ikkoaudio.startup.core.PhaseResult) {
+        satisfied = satisfied + pr.successTaskIds
+        failed = failed + pr.failures.map { it.taskId }.toSet()
+    }
 
     suspend fun runPhaseOnIo(phase: ExecutionPhase) {
         val pr = manager.startPhase(
@@ -41,32 +90,73 @@ suspend fun runPhasedStartup(
             printDag = false,
             clearTracer = false,
         )
-        satisfied = satisfied + pr.successTaskIds
-        failed = failed + pr.failures.map { it.taskId }.toSet()
+        mergeFrom(pr)
     }
 
     ensureActive()
     withContext(Dispatchers.Default) {
-        runPhaseOnIo(ExecutionPhase.BeforeFirstFrame)
+        when (beforeFirstFrameMode) {
+            BeforeFirstFrameMode.Full -> {
+                runPhaseOnIo(ExecutionPhase.BeforeFirstFrame)
+            }
+            BeforeFirstFrameMode.CriticalThenRemaining -> {
+                val c = manager.startBeforeFirstFrameUntilCritical(
+                    isCritical = { it.needWait },
+                    satisfiedFromEarlier = satisfied,
+                    failedFromEarlier = failed,
+                    printDag = false,
+                    clearTracer = false,
+                )
+                mergeFrom(c)
+                val rest = manager.startPhase(
+                    phase = ExecutionPhase.BeforeFirstFrame,
+                    satisfiedFromEarlier = satisfied,
+                    failedFromEarlier = failed,
+                    printDag = false,
+                    clearTracer = false,
+                )
+                mergeFrom(rest)
+            }
+        }
     }
     ensureActive()
     awaitChoreographerFrames(2)
+    ensureActive()
+    withContext(Dispatchers.Main.immediate) {
+        onAfterVsync(activity)
+    }
     ensureActive()
     withContext(Dispatchers.Default) {
         runPhaseOnIo(ExecutionPhase.AfterFirstFrame)
     }
     ensureActive()
-    awaitMainLooperIdle()
+    awaitMainLooperIdle(idleHandlerTimeoutMs)
     ensureActive()
     withContext(Dispatchers.Default) {
         runPhaseOnIo(ExecutionPhase.Idle)
     }
 }
 
-/**
- * Waits for [count] vsync-pulse frame callbacks. **Must** run on the main looper: this function
- * enforces that by dispatching to [Dispatchers.Main.immediate].
- */
+private val processPhasedRunOnce: AtomicBoolean = AtomicBoolean(false)
+
+private fun enterRunIfAllowedByPolicy(
+    activity: ComponentActivity,
+    runPolicy: PhasedStartupRunPolicy,
+): Boolean = when (runPolicy) {
+    PhasedStartupRunPolicy.EveryTime -> true
+    PhasedStartupRunPolicy.AtMostOncePerProcess -> processPhasedRunOnce.compareAndSet(false, true)
+    PhasedStartupRunPolicy.AtMostOncePerActivity -> {
+        val v = activity.window.decorView
+        @Suppress("UNCHECKED_CAST")
+        val b = (v.getTag(R.id.phased_startup_ran_once) as? AtomicBoolean) ?: run {
+            val n = AtomicBoolean(false)
+            v.setTag(R.id.phased_startup_ran_once, n)
+            n
+        }
+        b.compareAndSet(false, true)
+    }
+}
+
 private suspend fun awaitChoreographerFrames(count: Int) = withContext(Dispatchers.Main.immediate) {
     require(count > 0)
     val choreographer = Choreographer.getInstance()
@@ -78,14 +168,41 @@ private suspend fun awaitChoreographerFrames(count: Int) = withContext(Dispatche
 }
 
 /**
- * Resumes after the main message queue is idle. **Must** use the main looper’s [android.os.MessageQueue];
- * enforced via [Dispatchers.Main.immediate].
+ * Resumes on main **idle** or when [timeoutMs] elapses on the main [android.os.Handler] (whichever first).
+ * If you pass `null` for [timeoutMs], only the idle handler is used (possible long wait if the main thread
+ * never goes idle).
  */
-private suspend fun awaitMainLooperIdle() = withContext(Dispatchers.Main.immediate) {
-    suspendCoroutine { cont ->
-        Looper.myQueue().addIdleHandler {
-            cont.resume(Unit)
-            false
+private suspend fun awaitMainLooperIdle(
+    timeoutMs: Long? = 2_000L,
+) = withContext(Dispatchers.Main.immediate) {
+    if (timeoutMs == null) {
+        suspendCoroutine { cont ->
+            Looper.myQueue().addIdleHandler {
+                cont.resume(Unit)
+                false
+            }
+        }
+    } else {
+        suspendCancellableCoroutine { cont ->
+            var done = false
+            val handler = android.os.Handler(Looper.getMainLooper())
+            val timeoutRunnable = Runnable {
+                if (!cont.isActive) return@Runnable
+                if (done) return@Runnable
+                done = true
+                cont.resume(Unit)
+            }
+            handler.postDelayed(timeoutRunnable, timeoutMs)
+            Looper.myQueue().addIdleHandler {
+                if (done || !cont.isActive) return@addIdleHandler false
+                done = true
+                handler.removeCallbacks(timeoutRunnable)
+                cont.resume(Unit)
+                false
+            }
+            cont.invokeOnCancellation {
+                handler.removeCallbacks(timeoutRunnable)
+            }
         }
     }
 }

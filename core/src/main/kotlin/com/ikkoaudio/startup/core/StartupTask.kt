@@ -9,7 +9,13 @@ interface StartupTask {
     val dependencies: List<String>
     val runOnMainThread: Boolean
 
-    /** If true, host code may treat this task as part of the critical path (e.g. splash). */
+    /**
+     * When true, this task is part of the **critical** [ExecutionPhase.BeforeFirstFrame] path for
+     * [StartupManager.startBeforeFirstFrameUntilCritical] (and optional app helpers that run “critical” work first,
+     * then the remainder of the phase). The default predicate uses [needWait] together with transitive in-phase
+     * dependencies. Callers can wait for splash / routing when this subset finishes, and run the rest of the
+     * same phase in a follow-up [StartupManager.startPhase] with [satisfiedFromEarlier] set.
+     */
     val needWait: Boolean
 
     /** Higher runs earlier among tasks that share the same dependency readiness (tie-break in topo sort). */

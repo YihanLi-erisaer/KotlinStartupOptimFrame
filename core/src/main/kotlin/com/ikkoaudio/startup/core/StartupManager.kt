@@ -32,6 +32,18 @@ class StartupManager(
     private val ioPermits: Semaphore? =
         maxParallelIo?.coerceIn(1, 10_000)?.let { Semaphore(it) }
 
+    /**
+     * Same as the primary constructor with [StartupManager.tasks] = [registry].collectTasks().
+     * Useful when wiring from DI or a test-scoped [StartupTaskRegistry] instead of the global [TaskRegistry].
+     */
+    constructor(
+        registry: StartupTaskRegistry,
+        dispatcher: StartupDispatcher = StartupDispatcher(),
+        maxParallelIo: Int? = null,
+        taskTiming: TaskTimingSink = StartupTracer,
+        runInterceptor: TaskRunInterceptor = TaskRunInterceptor.None,
+    ) : this(registry.collectTasks(), dispatcher, maxParallelIo, taskTiming, runInterceptor)
+
     init {
         val dup = tasks.groupBy { it.id }.filter { it.value.size > 1 }.keys
         require(dup.isEmpty()) { "Duplicate startup task ids: ${dup.joinToString()}" }
@@ -80,6 +92,43 @@ class StartupManager(
         summary
     }
 
+    /**
+     * Runs only the [BeforeFirstFrame][ExecutionPhase.BeforeFirstFrame] **critical closure**:
+     * tasks in that phase for which [isCritical] is true, plus all of their (transitive) **in-phase** dependencies.
+     * When this [PhaseResult] is returned, those tasks have finished; any remaining
+     * [BeforeFirstFrame] work must be started with
+     * `startPhase(BeforeFirstFrame, satisfiedFromEarlier = this.successTaskIds, …)`.
+     *
+     * @param isCritical Defaults to [StartupTask.needWait] so you can “wait for the splash / router” only
+     * what you marked; override with a custom lambda if you need a different policy.
+     */
+    suspend fun startBeforeFirstFrameUntilCritical(
+        isCritical: (StartupTask) -> Boolean = { it.needWait },
+        satisfiedFromEarlier: Set<String> = emptySet(),
+        failedFromEarlier: Set<String> = emptySet(),
+        printDag: Boolean = false,
+        sink: (String) -> Unit = { println(it) },
+        clearTracer: Boolean = false,
+    ): PhaseResult {
+        val closure = computeBeforeFirstFrameCriticalClosure(tasks, isCritical)
+        if (closure.isEmpty()) {
+            return PhaseResult(
+                successTaskIds = emptySet(),
+                failures = emptyList(),
+                skipped = emptyList(),
+            )
+        }
+        return startPhase(
+            phase = ExecutionPhase.BeforeFirstFrame,
+            satisfiedFromEarlier = satisfiedFromEarlier,
+            failedFromEarlier = failedFromEarlier,
+            printDag = printDag,
+            sink = sink,
+            clearTracer = clearTracer,
+            onlyInPhaseTaskIds = closure,
+        )
+    }
+
     private fun hasAnyInMemoryTraces(): Boolean = when (val t = taskTiming) {
         is InMemoryTaskTraceStore -> t.snapshot().isNotEmpty()
         is CompositeTaskTimingSink -> t.sinks.any { (it as? InMemoryTaskTraceStore)?.snapshot()?.isNotEmpty() == true }
@@ -101,10 +150,17 @@ class StartupManager(
         printDag: Boolean = false,
         sink: (String) -> Unit = { println(it) },
         clearTracer: Boolean = false,
+        onlyInPhaseTaskIds: Set<String>? = null,
     ): PhaseResult = supervisorScope {
         if (clearTracer) taskTiming.reset()
 
-        val (sorted, planSkipped) = planRunnableTasksInPhase(phase, tasks, satisfiedFromEarlier, failedFromEarlier)
+        val (sorted, planSkipped) = planRunnableTasksInPhase(
+            phase = phase,
+            allTasks = tasks,
+            satisfiedFromEarlier = satisfiedFromEarlier,
+            failedTaskIds = failedFromEarlier,
+            onlyInPhaseTaskIds = onlyInPhaseTaskIds,
+        )
         if (printDag) printDAG(sorted, sink)
         if (sorted.isEmpty()) {
             return@supervisorScope PhaseResult(
